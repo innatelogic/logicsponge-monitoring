@@ -4,15 +4,15 @@ from datetime import datetime, timedelta
 
 import pytz
 
-import datasponge.core as ds
-from datasponge.core import dashboard
-from datasponge.monitoring import Earlier, Previous, Proposition, Time, TimeInterval
+import logicsponge.core as ls
+from logicsponge.core import dashboard
+from logicsponge.monitoring import Earlier, Previous, Proposition, Time, TimeInterval
 
 
-def generate_random_dict(current_time: Time | None = None) -> ds.DataItem:
+def generate_random_dict(current_time: Time | None = None) -> ls.DataItem:
     if current_time is None:
-        return ds.DataItem({"A": bool(random.getrandbits(1)), "B": bool(random.getrandbits(1))})
-    return ds.DataItem(
+        return ls.DataItem({"A": bool(random.getrandbits(1)), "B": bool(random.getrandbits(1))})
+    return ls.DataItem(
         {
             "Time": current_time,
             "A": bool(random.getrandbits(1)),
@@ -21,7 +21,7 @@ def generate_random_dict(current_time: Time | None = None) -> ds.DataItem:
     )
 
 
-class Source(ds.SourceTerm):
+class Source(ls.SourceTerm):
     current_time: datetime = datetime.now(pytz.timezone("Europe/Paris"))
 
     def run(self):
@@ -46,8 +46,8 @@ def main():
 
     circuit = (
         Source()
-        * (ds.KeyFilter(not_keys="Time") | monitor | monitor_p * ds.Rename(fun=lambda x: "P" if x == "Sat" else x))
-        * ds.ToSingleStream(merge=True)
+        * (ls.KeyFilter(not_keys="Time") | monitor | monitor_p * ls.Rename(fun=lambda x: "P" if x == "Sat" else x))
+        * ls.ToSingleStream(merge=True)
         * dashboard.BinaryPlot(x="Time", y=["A", "B", "Sat", "P"])
     )
     circuit.start()

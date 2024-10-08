@@ -1,4 +1,4 @@
-from datasponge.monitoring.monitoring import (
+from logicsponge.monitoring.monitoring import (
     PMTL,
     And,
     BinaryOperation,
