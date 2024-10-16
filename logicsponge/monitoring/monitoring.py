@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-import datasponge.core as ds
+import logicsponge.core as ls
 
 Time = datetime
 TimeDelta = timedelta
@@ -69,14 +69,14 @@ class BothOpen(TimeInterval):
         super().__init__(start, end, start_strict=True, end_strict=True)
 
 
-class BooleanAggregate(ds.FunctionTerm):
+class BooleanAggregate(ls.FunctionTerm):
     boolean_operation: Callable[[bool, bool], bool]
 
     def __init__(self, *args, op: Callable[[bool, bool], bool], **kwargs):
         super().__init__(*args, **kwargs)
         self.boolean_operation = op
 
-    def run(self, ds_views: tuple[ds.DataStreamView]):
+    def run(self, ds_views: tuple[ls.DataStreamView]):
         if len(ds_views) <= 1:
             msg = "Expecting two data streams"
             raise ValueError(msg)
@@ -93,7 +93,7 @@ class BooleanAggregate(ds.FunctionTerm):
             raise NotImplementedError(msg)
 
         sat = self.boolean_operation(sat1, sat2)
-        out = ds.DataItem({"Sat": sat})
+        out = ls.DataItem({"Sat": sat})
         self.output(out)
 
 
@@ -111,7 +111,7 @@ class PMTL(ABC):
         return self.__str__()
 
     @abstractmethod
-    def to_term(self, name: str | None = None) -> ds.Term:
+    def to_term(self, name: str | None = None) -> ls.Term:
         """
         Passing a name ensures that each sub-term has a unique identifier
         within the term associated with the given formula.
@@ -124,9 +124,9 @@ class PMTL(ABC):
 class Proposition(PMTL):
     """Class representing atomic propositions."""
 
-    condition: Callable[[ds.DataItem], bool]
+    condition: Callable[[ls.DataItem], bool]
 
-    def __init__(self, condition: Callable[[ds.DataItem], bool] | None = None):
+    def __init__(self, condition: Callable[[ls.DataItem], bool] | None = None):
         super().__init__()
         if condition is None:
             msg = "A condition must be provided."
@@ -136,15 +136,15 @@ class Proposition(PMTL):
     def __str__(self):
         return "Proposition"
 
-    def to_term(self, name: str | None = None) -> ds.FunctionTerm:
+    def to_term(self, name: str | None = None) -> ls.FunctionTerm:
         proposition_instance = self
 
-        class Check(ds.FunctionTerm):
-            def f(self, item: ds.DataItem) -> ds.DataItem:
+        class Check(ls.FunctionTerm):
+            def f(self, item: ls.DataItem) -> ls.DataItem:
                 sat = proposition_instance.condition(item)
                 if "Time" in item:
-                    return ds.DataItem({"Time": item["Time"], "Sat": sat})
-                return ds.DataItem({"Sat": sat})
+                    return ls.DataItem({"Time": item["Time"], "Sat": sat})
+                return ls.DataItem({"Sat": sat})
 
         return Check(name if name else "Root")
 
@@ -155,12 +155,12 @@ class TrueFormula(PMTL):
     def __str__(self):
         return "True"
 
-    def to_term(self, name: str | None = None) -> ds.FunctionTerm:
-        class OutputTrue(ds.FunctionTerm):
-            def f(self, item: ds.DataItem) -> ds.DataItem:
+    def to_term(self, name: str | None = None) -> ls.FunctionTerm:
+        class OutputTrue(ls.FunctionTerm):
+            def f(self, item: ls.DataItem) -> ls.DataItem:
                 if "Time" in item:
-                    return ds.DataItem({"Time": item["Time"], "Sat": True})
-                return ds.DataItem({"Sat": True})
+                    return ls.DataItem({"Time": item["Time"], "Sat": True})
+                return ls.DataItem({"Sat": True})
 
         return OutputTrue(name if name else "Root")
 
@@ -177,14 +177,14 @@ class Not(PMTL):
     def __str__(self):
         return f"¬({self.formula})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term = self.formula.to_term(generate_name(name, "0"))
 
-        class Inverter(ds.FunctionTerm):
-            def f(self, item: ds.DataItem) -> ds.DataItem:
+        class Inverter(ls.FunctionTerm):
+            def f(self, item: ls.DataItem) -> ls.DataItem:
                 if "Time" in item:
-                    return ds.DataItem({"Time": item["Time"], "Sat": not item["Sat"]})
-                return ds.DataItem({"Sat": not item["Sat"]})
+                    return ls.DataItem({"Time": item["Time"], "Sat": not item["Sat"]})
+                return ls.DataItem({"Sat": not item["Sat"]})
 
         inverter_name = generate_name(name, "1")
         inverter = Inverter(inverter_name)
@@ -208,7 +208,7 @@ class BinaryOperation(PMTL):
         op_symbol = "|" if self.operator == operator.or_ else "&"
         return f"({self.formula1}) {op_symbol} ({self.formula2})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term1 = self.formula1.to_term(generate_name(name, "00"))
         term2 = self.formula2.to_term(generate_name(name, "01"))
 
@@ -247,18 +247,18 @@ class Previous(PMTL):
             return f"Previous({self.formula}, {self.interval})"
         return f"Previous({self.formula})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term = self.formula.to_term(generate_name(name, "0"))
         interval = self.interval
 
-        class CheckPrevious(ds.FunctionTerm):
+        class CheckPrevious(ls.FunctionTerm):
             state: dict[str, Any]
 
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.state = {"Time": None, "Sat": False}  # maintaining Time satisfaction at previous position
 
-            def f(self, item: ds.DataItem) -> ds.DataItem:
+            def f(self, item: ls.DataItem) -> ls.DataItem:
                 prev_sat = self.state["Sat"]
                 if interval is None:
                     out = {"Sat": prev_sat} if "Time" not in item else {"Time": item["Time"], "Sat": prev_sat}
@@ -274,7 +274,7 @@ class Previous(PMTL):
                     out = {"Time": item["Time"], "Sat": timing_condition & prev_sat}
                     self.state = restrict_keys(item, {"Time", "Sat"})
 
-                return ds.DataItem(out)
+                return ls.DataItem(out)
 
         check_name = generate_name(name, "1")
         check = CheckPrevious(check_name)
@@ -299,12 +299,12 @@ class Since(PMTL):
     def __str__(self):
         return f"({self.formula1}) Since ({self.formula2})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term1 = self.formula1.to_term(generate_name(name, "00"))
         term2 = self.formula2.to_term(generate_name(name, "01"))
         interval = self.interval
 
-        class CheckSince(ds.FunctionTerm):
+        class CheckSince(ls.FunctionTerm):
             state: dict[str, Any]
 
             def __init__(self, *args, **kwargs):
@@ -332,7 +332,7 @@ class Since(PMTL):
                         continue
                     break
 
-            def run(self, ds_views: tuple[ds.DataStreamView]):
+            def run(self, ds_views: tuple[ls.DataStreamView]):
                 if len(ds_views) <= 1:
                     msg = "Expecting two data streams"
                     raise ValueError(msg)
@@ -376,7 +376,7 @@ class Since(PMTL):
                     else:
                         out = {"Time": current_time, "Sat": False}
 
-                self.output(ds.DataItem(out))
+                self.output(ls.DataItem(out))
 
         parallel = term1 | term2
         parallel.name = generate_name(name, "0")
@@ -401,7 +401,7 @@ class Earlier(PMTL):
     def __str__(self):
         return f"Earlier({self.formula})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         formula = Since(TrueFormula(), self.formula, self.interval)
         return formula.to_term(name)
 
@@ -420,6 +420,6 @@ class Hist(PMTL):
     def __str__(self):
         return f"Hist({self.formula})"
 
-    def to_term(self, name: str | None = None) -> ds.SequentialTerm:
+    def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         formula = ~Earlier(~self.formula, self.interval)
         return formula.to_term(name)
