@@ -361,17 +361,16 @@ class Since(PMTL):
                     raise RuntimeError(msg)
                 else:
                     current_time = data_item1["Time"]
-                    times = self.state["Times"]
                     if not sat1:
-                        times = deque()  # Reset times to an empty deque
+                        self.state["Times"] = deque()  # Reset times to an empty deque
                     if sat2:
-                        times.append(current_time)
+                        self.state["Times"].append(current_time)
 
-                    self._truncate_times(times, current_time)
+                    self._truncate_times(self.state["Times"], current_time)
 
                     # check satisfaction at current position
-                    if times:
-                        sat = interval.is_contained(current_time - times[0])
+                    if self.state["Times"]:
+                        sat = interval.is_contained(current_time - self.state["Times"][0])
                         out = {"Time": current_time, "Sat": sat}
                     else:
                         out = {"Time": current_time, "Sat": False}
