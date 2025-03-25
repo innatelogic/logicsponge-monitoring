@@ -7,6 +7,7 @@ from typing import Any
 
 import logicsponge.core as ls
 
+
 Time = datetime
 TimeDelta = timedelta
 
