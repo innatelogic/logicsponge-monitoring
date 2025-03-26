@@ -78,24 +78,25 @@ class BooleanAggregate(ls.FunctionTerm):
         self.boolean_operation = op
 
     def run(self, ds_views: tuple[ls.DataStreamView]):
-        if len(ds_views) <= 1:
-            msg = "Expecting two data streams"
-            raise ValueError(msg)
+        while True:
+            if len(ds_views) <= 1:
+                msg = "Expecting two data streams"
+                raise ValueError(msg)
 
-        ds_view1, ds_view2 = ds_views[0], ds_views[1]
-        self.next(ds_view1)
-        self.next(ds_view2)
+            ds_view1, ds_view2 = ds_views[0], ds_views[1]
+            self.next(ds_view1)
+            self.next(ds_view2)
 
-        sat1 = ds_view1[-1]["Sat"]
-        sat2 = ds_view2[-1]["Sat"]
+            sat1 = ds_view1[-1]["Sat"]
+            sat2 = ds_view2[-1]["Sat"]
 
-        if self.boolean_operation is None:
-            msg = "Logical operation not defined"
-            raise NotImplementedError(msg)
+            if self.boolean_operation is None:
+                msg = "Logical operation not defined"
+                raise NotImplementedError(msg)
 
-        sat = self.boolean_operation(sat1, sat2)
-        out = ls.DataItem({"Sat": sat})
-        self.output(out)
+            sat = self.boolean_operation(sat1, sat2)
+            out = ls.DataItem({"Sat": sat})
+            self.output(out)
 
 
 class PMTL(ABC):
@@ -334,49 +335,50 @@ class Since(PMTL):
                     break
 
             def run(self, ds_views: tuple[ls.DataStreamView]):
-                if len(ds_views) <= 1:
-                    msg = "Expecting two data streams"
-                    raise ValueError(msg)
+                while True:
+                    if len(ds_views) <= 1:
+                        msg = "Expecting two data streams"
+                        raise ValueError(msg)
 
-                ds_view1, ds_view2 = ds_views[0], ds_views[1]
-                self.next(ds_view1)
-                self.next(ds_view2)
+                    ds_view1, ds_view2 = ds_views[0], ds_views[1]
+                    self.next(ds_view1)
+                    self.next(ds_view2)
 
-                data_item1 = ds_view1[-1]
-                data_item2 = ds_view2[-1]
+                    data_item1 = ds_view1[-1]
+                    data_item2 = ds_view2[-1]
 
-                sat1 = data_item1["Sat"]
-                sat2 = data_item2["Sat"]
+                    sat1 = data_item1["Sat"]
+                    sat2 = data_item2["Sat"]
 
-                if interval is None:
-                    sat = sat2 or (sat1 and self.state["Sat"])
-                    if "Time" not in data_item1:
-                        out = {"Sat": sat}
+                    if interval is None:
+                        sat = sat2 or (sat1 and self.state["Sat"])
+                        if "Time" not in data_item1:
+                            out = {"Sat": sat}
+                        else:
+                            current_time = data_item1["Time"]
+                            out = {"Time": current_time, "Sat": sat}
+
+                        self.state = {"Times": self.state["Times"], "Sat": sat}
+                    elif "Time" not in data_item1:
+                        msg = "No timing information available in current data item."
+                        raise RuntimeError(msg)
                     else:
                         current_time = data_item1["Time"]
-                        out = {"Time": current_time, "Sat": sat}
+                        if not sat1:
+                            self.state["Times"] = deque()  # Reset times to an empty deque
+                        if sat2:
+                            self.state["Times"].append(current_time)
 
-                    self.state = {"Times": self.state["Times"], "Sat": sat}
-                elif "Time" not in data_item1:
-                    msg = "No timing information available in current data item."
-                    raise RuntimeError(msg)
-                else:
-                    current_time = data_item1["Time"]
-                    if not sat1:
-                        self.state["Times"] = deque()  # Reset times to an empty deque
-                    if sat2:
-                        self.state["Times"].append(current_time)
+                        self._truncate_times(self.state["Times"], current_time)
 
-                    self._truncate_times(self.state["Times"], current_time)
+                        # check satisfaction at current position
+                        if self.state["Times"]:
+                            sat = interval.is_contained(current_time - self.state["Times"][0])
+                            out = {"Time": current_time, "Sat": sat}
+                        else:
+                            out = {"Time": current_time, "Sat": False}
 
-                    # check satisfaction at current position
-                    if self.state["Times"]:
-                        sat = interval.is_contained(current_time - self.state["Times"][0])
-                        out = {"Time": current_time, "Sat": sat}
-                    else:
-                        out = {"Time": current_time, "Sat": False}
-
-                self.output(ls.DataItem(out))
+                    self.output(ls.DataItem(out))
 
         parallel = term1 | term2
         parallel.name = generate_name(name, "0")
