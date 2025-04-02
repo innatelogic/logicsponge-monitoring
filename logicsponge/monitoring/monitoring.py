@@ -95,9 +95,15 @@ class BooleanAggregate(ls.FunctionTerm):
                 raise NotImplementedError(msg)
 
             sat = self.boolean_operation(sat1, sat2)
-            out = ls.DataItem({"Sat": sat})
-            self.output(out)
 
+            # Preserve the Time field if it exists in either of the data items
+            out = {"Sat": sat}
+            if "Time" in ds_view1[-1]:
+                out["Time"] = ds_view1[-1]["Time"]
+            elif "Time" in ds_view2[-1]:
+                out["Time"] = ds_view2[-1]["Time"]
+
+            self.output(ls.DataItem(out))
 
 class PMTL(ABC):
     def __or__(self, other):
