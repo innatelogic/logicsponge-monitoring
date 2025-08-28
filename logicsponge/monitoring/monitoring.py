@@ -97,7 +97,7 @@ class BooleanAggregate(ls.FunctionTerm):
             sat = self.boolean_operation(sat1, sat2)
 
             # Preserve the Time field if it exists in either of the data items
-            out = {"Sat": sat}
+            out = {"Sat": sat, "reason": f"Evaluation result: {sat}"}
             if "Time" in ds_view1[-1]:
                 out["Time"] = ds_view1[-1]["Time"]
             elif "Time" in ds_view2[-1]:
@@ -149,10 +149,12 @@ class Proposition(PMTL):
 
         class Check(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
-                sat = proposition_instance.condition(item)
+                sat_raw = proposition_instance.condition(item)
+                sat = bool(sat_raw)
+                
                 if "Time" in item:
-                    return ls.DataItem({"Time": item["Time"], "Sat": sat})
-                return ls.DataItem({"Sat": sat})
+                    return ls.DataItem({"Time": item["Time"], "Sat": sat, "reason": f"Evaluation result: {sat}"})
+                return ls.DataItem({"Sat": sat, "reason": f"Evaluation result: {sat}"})
 
         return Check(name if name else "Root")
 
@@ -167,8 +169,8 @@ class TrueFormula(PMTL):
         class OutputTrue(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
                 if "Time" in item:
-                    return ls.DataItem({"Time": item["Time"], "Sat": True})
-                return ls.DataItem({"Sat": True})
+                    return ls.DataItem({"Time": item["Time"], "Sat": True, "reason": f"Evaluation result: {True}"})
+                return ls.DataItem({"Sat": True, "reason": f"Evaluation result: {True}"})
 
         return OutputTrue(name if name else "Root")
 
@@ -183,16 +185,17 @@ class Not(PMTL):
         self.formula = formula
 
     def __str__(self):
-        return f"¬({self.formula})"
+        return f"Â¬({self.formula})"
 
     def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term = self.formula.to_term(generate_name(name, "0"))
 
         class Inverter(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
+                sat = not item["Sat"]
                 if "Time" in item:
-                    return ls.DataItem({"Time": item["Time"], "Sat": not item["Sat"]})
-                return ls.DataItem({"Sat": not item["Sat"]})
+                    return ls.DataItem({"Time": item["Time"], "Sat": sat, "reason": f"Evaluation result: {sat}"})
+                return ls.DataItem({"Sat": sat, "reason": f"Evaluation result: {sat}"})
 
         inverter_name = generate_name(name, "1")
         inverter = Inverter(inverter_name)
@@ -269,7 +272,7 @@ class Previous(PMTL):
             def f(self, item: ls.DataItem) -> ls.DataItem:
                 prev_sat = self.state["Sat"]
                 if interval is None:
-                    out = {"Sat": prev_sat} if "Time" not in item else {"Time": item["Time"], "Sat": prev_sat}
+                    out = {"Sat": prev_sat, "reason": f"Evaluation result: {prev_sat}"} if "Time" not in item else {"Time": item["Time"], "Sat": prev_sat, "reason": f"Evaluation result: {prev_sat}"}
                     self.state = restrict_keys(item, {"Time", "Sat"})
                 elif "Time" not in item:
                     msg = "No timing information available in current data item."
@@ -279,7 +282,8 @@ class Previous(PMTL):
                         timing_condition = interval.is_contained(item["Time"] - self.state["Time"])
                     else:
                         timing_condition = False
-                    out = {"Time": item["Time"], "Sat": timing_condition & prev_sat}
+                    sat = timing_condition & prev_sat
+                    out = {"Time": item["Time"], "Sat": sat, "reason": f"Evaluation result: {sat}"}
                     self.state = restrict_keys(item, {"Time", "Sat"})
 
                 return ls.DataItem(out)
@@ -359,10 +363,10 @@ class Since(PMTL):
                     if interval is None:
                         sat = sat2 or (sat1 and self.state["Sat"])
                         if "Time" not in data_item1:
-                            out = {"Sat": sat}
+                            out = {"Sat": sat, "reason": f"Evaluation result: {sat}"}
                         else:
                             current_time = data_item1["Time"]
-                            out = {"Time": current_time, "Sat": sat}
+                            out = {"Time": current_time, "Sat": sat, "reason": f"Evaluation result: {sat}"}
 
                         self.state = {"Times": self.state["Times"], "Sat": sat}
                     elif "Time" not in data_item1:
@@ -380,9 +384,10 @@ class Since(PMTL):
                         # check satisfaction at current position
                         if self.state["Times"]:
                             sat = interval.is_contained(current_time - self.state["Times"][0])
-                            out = {"Time": current_time, "Sat": sat}
+                            out = {"Time": current_time, "Sat": sat, "reason": f"Evaluation result: {sat}"}
                         else:
-                            out = {"Time": current_time, "Sat": False}
+                            sat = False
+                            out = {"Time": current_time, "Sat": sat, "reason": f"Evaluation result: {sat}"}
 
                     self.output(ls.DataItem(out))
 
