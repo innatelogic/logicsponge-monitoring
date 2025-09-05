@@ -13,6 +13,34 @@ Time = datetime
 TimeDelta = timedelta
 
 
+def _get_id_from(item: ls.DataItem, id_key: str = "ID") -> Any | None:
+    return item.get(id_key) if isinstance(item, dict) and id_key in item else None
+
+
+def _safe_get(obj, key, default=None):
+    # Works for dict-like and objects exposing .get
+    try:
+        if hasattr(obj, "get"):
+            return obj.get(key, default)
+    except TypeError:
+        pass
+    return default
+
+
+def _item_ref(item: ls.DataItem) -> dict[str, Any] | None:
+    # Returns {"id": ..., "time": ...} or None
+    _id = _safe_get(item, "ID", None)
+    _t  = _safe_get(item, "Time", None)
+    if _id is None and _t is None:
+        return None
+    return {"id": _id, "time": _t}
+
+
+
+def _short(msg: str, limit: int = 120) -> str:
+    return msg if len(msg) <= limit else msg[:limit - 1].rstrip() + "…"
+
+
 def _get_time_from(item: ls.DataItem) -> Any | None:
     return item.get("Time") if isinstance(item, dict) and "Time" in item else None
 
@@ -28,25 +56,47 @@ def generate_name(default_name: str | None, suffix: str) -> str:
 
 @dataclass(frozen=True)
 class Reason:
-    kind: str                 # e.g. "proposition" (later: "and", "or", "not", etc.)
-    value: bool               # the boolean outcome
-    message: str              # human-readable explanation
-    time: Any | None = None   # optional timestamp; usually item.get("Time")
-    label: str = ""           # optional short name (e.g., "HR>120")
-    # Later add: evidence: dict[str, Any] = field(default_factory=dict)
+    kind: str                  # e.g. "proposition", "and", "or", "not", "since"
+    value: bool                # Boolean outcome
+    message: str               # Single-line human-readable summary
+    time: Any | None = None    # Usually item["Time"]
+    label: str = ""            # Optional short name, e.g. "HR>120"
 
+    # Structure and evidence
+    children: tuple["Reason", ...] = ()           # sub-reasons (kept small)
+    item: dict[str, Any] | None = None            # {"id":..., "time":...} of this decision point
+    evidence: tuple[dict[str, Any], ...] = ()     # concrete witness items for timeline
+    span: dict[str, dict[str, Any]] | None = None # {"start": {...}, "end": {...}} if contiguous witness interval
+    example_reason: "Reason | None" = None        # one representative guard reason inside span (success case)
+
+    # Convert to plain dict (for JSON export, UI, logs)
     def to_dict(self) -> dict[str, Any]:
-        d = {"value": self.value, "message": self.message}
+        d: dict[str, Any] = {
+            "kind": self.kind,
+            "value": self.value,
+            "message": self.message,
+        }
         if self.time is not None:
             d["Time"] = self.time
         if self.label:
             d["label"] = self.label
-        d["kind"] = self.kind
+        if self.children:
+            d["children"] = [c.to_dict() for c in self.children]
+        if self.item is not None:
+            d["item"] = self.item
+        if self.evidence:
+            d["evidence"] = list(self.evidence)
+        if self.span is not None:
+            d["span"] = self.span
+        if self.example_reason is not None:
+            d["example_reason"] = self.example_reason.to_dict()
         return d
 
     def __str__(self) -> str:
         head = f"[{self.label}] " if self.label else ""
-        return f"{head}{self.message} (value={self.value})"
+        ex = f" | Example: {self.example_reason.message}" if self.example_reason else ""
+        return f"{head}{self.message} (value={self.value}){ex}"
+
 
 
 # ---- Condition: minimal API per your spec, now returning Reason ----
@@ -84,12 +134,26 @@ class Condition:
         value = bool(self.func(item))
         msg = self.true_message(item) if value else self.false_message(item)
         t = item.get("Time") if (self.include_time and isinstance(item, dict)) else None
-        return Reason(kind=self.kind, value=value, message=msg, time=t, label=self.label)
+
+        # identity + evidence for timeline
+        ir = {"id": item.get("ID"), "time": t} if isinstance(item, dict) else None
+        evidence = (ir,) if ir else ()
+
+        return Reason(
+            kind=self.kind,
+            value=value,
+            message=msg,
+            time=t,
+            label=self.label,
+            item=ir,
+            evidence=evidence,
+        )
 
     # Back-compat helper: old shape {"value","message",["Time"]}
     def evaluate_simple(self, item: ls.DataItem) -> dict[str, Any]:
         r = self.evaluate(item)
-        return r.to_dict()  # already returns {"value","message", ...}
+        return r.to_dict()
+
 
 
 # Usage
@@ -151,21 +215,23 @@ class BooleanAggregate(ls.FunctionTerm):
     def run(self, ds_views: tuple[ls.DataStreamView]):
         while True:
             if len(ds_views) <= 1:
-                msg = "Expecting two data streams"
-                raise ValueError(msg)
+                raise ValueError("Expecting two data streams")
 
+            # Advance both inputs
             ds_view1, ds_view2 = ds_views[0], ds_views[1]
             self.next(ds_view1)
             self.next(ds_view2)
 
             di1 = ds_view1[-1]
             di2 = ds_view2[-1]
+
             sat1 = bool(di1["Sat"])
             sat2 = bool(di2["Sat"])
+            r1: Reason | None = di1.get("reason")
+            r2: Reason | None = di2.get("reason")
 
             if self.boolean_operation is None:
-                msg = "Logical operation not defined"
-                raise NotImplementedError(msg)
+                raise NotImplementedError("Logical operation not defined")
 
             sat = self.boolean_operation(sat1, sat2)
 
@@ -181,15 +247,58 @@ class BooleanAggregate(ls.FunctionTerm):
             t = di1.get("Time") if isinstance(di1, dict) and "Time" in di1 else (
                 di2.get("Time") if isinstance(di2, dict) and "Time" in di2 else None
             )
+            # Decision item for the timeline (use whichever has an item/Time)
+            decision_item = _item_ref(di1) or _item_ref(di2)
 
-            # Build a minimal Reason (we can compose child reasons later if desired)
-            r = Reason(kind=kind, value=sat, message=f"Evaluation result: {sat}", time=t)
+            # --- Compose message & evidence policy ---
+            if kind == "and":
+                if sat:
+                    msg = "Both conditions satisfied."
+                    ev: tuple[dict, ...] = tuple((r1.evidence or ()) + (r2.evidence or ())) if (r1 or r2) else ()
+                else:
+                    # List only culprits (false children)
+                    culprits: list[str] = []
+                    if not sat1 and r1 is not None:
+                        culprits.append(_short(r1.message))
+                    if not sat2 and r2 is not None:
+                        culprits.append(_short(r2.message))
+                    msg = "Conjunction failed: " + "; ".join(culprits) if culprits else "Conjunction failed."
+                    ev = ()
+                    if not sat1 and r1 is not None:
+                        ev += r1.evidence
+                    if not sat2 and r2 is not None:
+                        ev += r2.evidence
+            elif kind == "or":
+                if sat:
+                    # Winner = first true child (leftmost)
+                    winner = r1 if sat1 else r2
+                    msg = "Holds via: " + _short(winner.message) if winner else "Disjunction holds."
+                    ev = winner.evidence if winner else tuple()
+                else:
+                    msg = "Neither condition holds."
+                    ev = tuple((r1.evidence or ()) + (r2.evidence or ())) if (r1 or r2) else ()
+            else:
+                # Generic binary (if ever used)
+                msg = f"Evaluation result: {sat}"
+                ev = tuple((r1.evidence or ()) + (r2.evidence or ())) if (r1 or r2) else ()
 
-            out = {"Sat": sat, "reason": r}
+            reason = Reason(
+                kind=kind,
+                value=sat,
+                message=msg,
+                time=t,
+                children=tuple(x for x in (r1, r2) if x is not None),
+                item=decision_item,
+                evidence=ev,
+                span=None,
+            )
+
+            out = {"Sat": sat, "reason": reason}
             if t is not None:
                 out["Time"] = t
 
             self.output(ls.DataItem(out))
+
 
 
 class PMTL(ABC):
@@ -242,7 +351,7 @@ class Proposition(PMTL):
 
         if isinstance(condition, Condition):
             self.condition = condition
-            self._label = condition.label or "Proposition"
+            self._label = condition.label or (label or "Proposition")
         else:
             lbl = label or "Proposition"
             tm = _msg_callable(true_message, f"{lbl} is True")
@@ -264,11 +373,32 @@ class Proposition(PMTL):
 
         class Check(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
-                reason = prop.condition.evaluate(item)  # Reason
-                sat = bool(reason.value)
-                out = {"Sat": sat, "reason": reason}
-                if "Time" in item:
-                    out["Time"] = item["Time"]
+                # Leaf reason from Condition (ideally already has message + item/evidence)
+                base: Reason = prop.condition.evaluate(item)
+
+                # Ensure label, item, evidence (robust to non-dict items)
+                lbl = base.label or prop._label or ""
+                ir  = base.item or _item_ref(item)            # {"id":..., "time":...} or None
+                ev  = base.evidence or ((ir,) if ir else ())
+
+                # Only rebuild Reason if we need to inject/fix fields
+                reason = base if (lbl == base.label and ir == base.item and ev == base.evidence) else Reason(
+                    kind=base.kind,
+                    value=base.value,
+                    message=base.message,
+                    time=base.time if base.time is not None else _safe_get(item, "Time", None),
+                    label=lbl,
+                    children=base.children,
+                    item=ir,
+                    evidence=ev,
+                    span=base.span,
+                    example_reason=base.example_reason,
+                )
+
+                t = _safe_get(item, "Time", None)
+                out = {"Sat": bool(reason.value), "reason": reason}
+                if t is not None:
+                    out["Time"] = t
                 return ls.DataItem(out)
 
         return Check(name if name else "Root")
@@ -284,16 +414,24 @@ class TrueFormula(PMTL):
     def to_term(self, name: str | None = None) -> ls.FunctionTerm:
         class OutputTrue(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
+                t = _safe_get(item, "Time", None)
+                ir = _item_ref(item)
+
                 r = Reason(
                     kind="true",
                     value=True,
                     message="Formula 'True' always holds",
-                    time=_get_time_from(item),
+                    time=t,
                     label="True",
+                    children=(),
+                    item=ir,
+                    evidence=(),          # tautology → nothing to pin as evidence
+                    span=None,
+                    example_reason=None,
                 )
                 out = {"Sat": True, "reason": r}
-                if "Time" in item:
-                    out["Time"] = item["Time"]
+                if t is not None:
+                    out["Time"] = t
                 return ls.DataItem(out)
 
         return OutputTrue(name if name else "Root")
@@ -309,17 +447,42 @@ class Not(PMTL):
         self.formula = formula
 
     def __str__(self):
-        return f"Â¬({self.formula})"
+        return f"¬({self.formula})"  # fix encoding of the negation symbol
 
     def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         term = self.formula.to_term(generate_name(name, "0"))
 
         class Inverter(ls.FunctionTerm):
             def f(self, item: ls.DataItem) -> ls.DataItem:
-                prev = bool(item["Sat"])
+                prev = bool(_safe_get(item, "Sat", False))
+                child: Reason | None = _safe_get(item, "reason", None)
+
                 sat = not prev
-                t = _get_time_from(item)
-                r = Reason(kind="not", value=sat, message=f"not {prev} ⇒ {sat}", time=t, label="¬")
+                t = _safe_get(item, "Time", None)
+                ir = _item_ref(item)
+
+                if child is not None:
+                    msg = f"not ({_short(child.message)}) ⇒ {sat}"
+                    evidence = child.evidence
+                    kids = (child,)
+                else:
+                    msg = f"not {prev} ⇒ {sat}"
+                    evidence = ()
+                    kids = ()
+
+                r = Reason(
+                    kind="not",
+                    value=sat,
+                    message=msg,
+                    time=t,
+                    label="¬",
+                    children=kids,
+                    item=ir,
+                    evidence=evidence,
+                    span=None,
+                    example_reason=None,
+                )
+
                 out = {"Sat": sat, "reason": r}
                 if t is not None:
                     out["Time"] = t
@@ -395,33 +558,90 @@ class Previous(PMTL):
 
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.state = {"Time": None, "Sat": False}  # maintaining Time satisfaction at previous position
+                # Keep original fields + remember the child's Reason (for explanations)
+                self.state = {"Time": None, "Sat": False, "Reason": None}
 
             def f(self, item: ls.DataItem) -> ls.DataItem:
+                # --- original semantics preserved ---
                 prev_sat = self.state["Sat"]
-                if interval is None:
-                    out = (
-                        {"Sat": prev_sat, "reason": Reason(kind="previous", value=prev_sat, message=f"Evaluation result: {prev_sat}")}
-                        if "Time" not in item
-                        else {"Time": item["Time"], "Sat": prev_sat, "reason": Reason(kind="previous", value=prev_sat, message=f"Evaluation result: {prev_sat}")}
-                    )
-                    self.state = restrict_keys(item, {"Time", "Sat"})
-                elif "Time" not in item:
-                    msg = "No timing information available in current data item."
-                    raise RuntimeError(msg)
-                else:
-                    if self.state["Time"]:
-                        timing_condition = interval.is_contained(item["Time"] - self.state["Time"])
-                    else:
-                        timing_condition = False
-                    sat = timing_condition & prev_sat
-                    out = {
-                        "Time": item["Time"],
-                        "Sat": sat,
-                        "reason": Reason(kind="previous", value=sat, message=f"Evaluation result: {sat}"),
-                    }
-                    self.state = restrict_keys(item, {"Time", "Sat"})
 
+                # Robust accessors
+                t_now = _safe_get(item, "Time", None)
+                child_reason: Reason | None = _safe_get(item, "reason", None)
+                decision_item = _item_ref(item)
+
+                if interval is None:
+                    # Message/evidence based on previous child reason (if any)
+                    if self.state["Reason"] is not None:
+                        msg = f"Previous: {_short(self.state['Reason'].message)}"
+                        ev = self.state["Reason"].evidence
+                        kids = (self.state["Reason"],)
+                    else:
+                        msg = "Previous: not available."
+                        ev = ()
+                        kids = ()
+
+                    r = Reason(
+                        kind="previous",
+                        value=prev_sat,
+                        message=msg,
+                        time=t_now,
+                        children=kids,
+                        item=decision_item,
+                        evidence=ev,
+                        span=None,
+                        example_reason=None,
+                    )
+
+                    out = {"Sat": prev_sat, "reason": r}
+                    if t_now is not None:
+                        out["Time"] = t_now
+
+                    # --- original state update, augmented with Reason ---
+                    self.state = restrict_keys(item, {"Time", "Sat"})
+                    self.state["Reason"] = child_reason
+                    return ls.DataItem(out)
+
+                # --- interval case ---
+                if "Time" not in item:
+                    raise RuntimeError("No timing information available in current data item.")
+
+                if self.state["Time"]:
+                    timing_condition = interval.is_contained(item["Time"] - self.state["Time"])
+                else:
+                    timing_condition = False
+
+                # Keep original boolean computation exactly
+                sat = timing_condition & prev_sat
+
+                # Build explanation
+                if self.state["Reason"] is not None:
+                    msg_prev = _short(self.state["Reason"].message)
+                    msg = f"Previous (within {interval}): {msg_prev} ⇒ {sat}"
+                    ev = self.state["Reason"].evidence
+                    kids = (self.state["Reason"],)
+                else:
+                    msg = f"Previous (within {interval}): {prev_sat} ⇒ {sat}"
+                    ev = ()
+                    kids = ()
+
+                r = Reason(
+                    kind="previous",
+                    value=sat,
+                    message=msg,
+                    time=item["Time"],
+                    children=kids,
+                    item=decision_item,
+                    evidence=ev,
+                    span=None,
+                    example_reason=None,
+                )
+
+                out = {"Time": item["Time"], "Sat": sat, "reason": r}
+
+                # --- original state update, augmented with Reason ---
+                self.state = restrict_keys(item, {"Time", "Sat"})
+                self.state["Reason"] = child_reason
                 return ls.DataItem(out)
 
         check_name = generate_name(name, "1")
@@ -434,7 +654,7 @@ class Previous(PMTL):
 class Since(PMTL):
     """Class to represent the Since operator."""
 
-    formula1: PMTL
+    formula: PMTL
     formula2: PMTL
     interval: TimeInterval | None
 
@@ -457,7 +677,12 @@ class Since(PMTL):
 
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.state = {"Times": deque(), "Sat": False}  # maintaining satisfaction of Since formula
+                # Keep original fields for algorithm; add Witnesses only for explanations
+                self.state = {
+                    "Times": deque(),     # (used by your bounded-interval algorithm)
+                    "Sat": False,         # last Sat (used by unbounded algorithm)
+                    "Witnesses": deque()  # deque[(time, r2_reason)] for explanation only
+                }
 
             @staticmethod
             def _truncate_times(times: deque[Time], current_time: Time):
@@ -483,8 +708,7 @@ class Since(PMTL):
             def run(self, ds_views: tuple[ls.DataStreamView]):
                 while True:
                     if len(ds_views) <= 1:
-                        msg = "Expecting two data streams"
-                        raise ValueError(msg)
+                        raise ValueError("Expecting two data streams")
 
                     ds_view1, ds_view2 = ds_views[0], ds_views[1]
                     self.next(ds_view1)
@@ -493,50 +717,137 @@ class Since(PMTL):
                     data_item1 = ds_view1[-1]
                     data_item2 = ds_view2[-1]
 
-                    sat1 = data_item1["Sat"]
-                    sat2 = data_item2["Sat"]
+                    sat1 = bool(data_item1["Sat"])
+                    sat2 = bool(data_item2["Sat"])
+                    r1: Reason = data_item1.get("reason")
+                    r2: Reason = data_item2.get("reason")
 
+                    # ---------- UNBOUNDED CASE ----------
                     if interval is None:
+                        # keep your SAT computation
                         sat = sat2 or (sat1 and self.state["Sat"])
-                        if "Time" not in data_item1:
-                            out = {"Sat": sat, "reason": Reason(kind="since", value=sat, message=f"Evaluation result: {sat}")}
-                        else:
-                            current_time = data_item1["Time"]
-                            out = {
-                                "Time": current_time,
-                                "Sat": sat,
-                                "reason": Reason(kind="since", value=sat, message=f"Evaluation result: {sat}"),
-                            }
 
-                        self.state = {"Times": self.state["Times"], "Sat": sat}
-                    elif "Time" not in data_item1:
-                        msg = "No timing information available in current data item."
-                        raise RuntimeError(msg)
-                    else:
-                        current_time = data_item1["Time"]
-                        if not sat1:
-                            self.state["Times"] = deque()  # Reset times to an empty deque
+                        # explanation bits
+                        t_now = _safe_get(data_item1, "Time", None)
+                        now_ref = _item_ref(data_item1)
+
+                        # maintain witnesses only for explanations (no effect on sat)
                         if sat2:
-                            self.state["Times"].append(current_time)
+                            self.state["Witnesses"].append((t_now, r2))
 
-                        self._truncate_times(self.state["Times"], current_time)
+                        # choose the current witness (rightmost so far)
+                        witness = self.state["Witnesses"][-1] if self.state["Witnesses"] else None
 
-                        # check satisfaction at current position
-                        if self.state["Times"]:
-                            sat = interval.is_contained(current_time - self.state["Times"][0])
-                            out = {
-                                "Time": current_time,
-                                "Sat": sat,
-                                "reason": Reason(kind="since", value=sat, message=f"Evaluation result: {sat}"),
-                            }
+                        if sat:
+                            # Success: message uses φ2 witness message; span from witness to now (if both known)
+                            if witness and witness[1] and witness[1].item:
+                                msg = f"Since holds: {_short(witness[1].message)}; guard held to now."
+                                ev = witness[1].evidence
+                                span = {"start": witness[1].item, "end": now_ref} if now_ref else None
+                            else:
+                                msg = "Since holds."
+                                ev = ()
+                                span = None
+                            # one φ1 example in the span: use current r1 if sat1 (it lies at 'now')
+                            example = r1 if sat1 and isinstance(r1, Reason) else None
                         else:
-                            sat = False
-                            out = {
-                                "Time": current_time,
-                                "Sat": sat,
-                                "reason": Reason(kind="since", value=sat, message=f"Evaluation result: {sat}"),
-                            }
+                            # Failure (either no witness ever, or guard broken so earlier Sat dropped)
+                            msg = "Since fails: no witness or guard broken."
+                            ev = ()
+                            span = None
+                            example = None
 
+                        out_reason = Reason(
+                            kind="since",
+                            value=sat,
+                            message=msg,
+                            time=t_now,
+                            children=tuple(x for x in (r1, r2) if x is not None),
+                            item=now_ref,
+                            evidence=ev,
+                            span=span,
+                            example_reason=example,
+                        )
+
+                        self.state["Sat"] = sat  # keep your original state update
+                        out = {"Sat": sat, "reason": out_reason}
+                        if t_now is not None:
+                            out["Time"] = t_now
+                        self.output(ls.DataItem(out))
+                        continue
+
+                    # ---------- BOUNDED-INTERVAL CASE ----------
+                    if "Time" not in data_item1:
+                        raise RuntimeError("No timing information available in current data item.")
+                    current_time = data_item1["Time"]
+                    now_ref = _item_ref(data_item1)
+
+                    # keep your original guard reset and witness append
+                    if not sat1:
+                        self.state["Times"] = deque()    # reset
+                        self.state["Witnesses"] = deque() # explanations: reset aligned witnesses
+                    if sat2:
+                        self.state["Times"].append(current_time)
+                        self.state["Witnesses"].append((current_time, r2))
+
+                    # keep your truncation for Times; mirror for Witnesses (explanations)
+                    self._truncate_times(self.state["Times"], current_time)
+                    while self.state["Witnesses"] and interval.is_right_of(current_time - self.state["Witnesses"][0][0]):
+                        self.state["Witnesses"].popleft()
+
+                    # check satisfaction at current position (unchanged)
+                    if self.state["Times"]:
+                        t_star = self.state["Times"][0]
+                        sat = interval.is_contained(current_time - t_star)
+
+                        # find matching r2 for the witness time (for explanations)
+                        r2_star = None
+                        for (tw, rw) in self.state["Witnesses"]:
+                            if tw == t_star:
+                                r2_star = rw
+                                break
+
+                        if sat:
+                            # success
+                            if r2_star and r2_star.item:
+                                msg = f"Since holds: {_short(r2_star.message)}; guard held to now."
+                                ev = r2_star.evidence
+                                span = {"start": r2_star.item, "end": now_ref} if now_ref else None
+                            else:
+                                msg = "Since holds."
+                                ev = ()
+                                span = {"start": {"id": None, "time": t_star}, "end": now_ref} if now_ref else None
+                            example = r1 if sat1 and isinstance(r1, Reason) else None
+                        else:
+                            # failure: witness exists but interval condition not met yet
+                            if r2_star:
+                                msg = f"Since fails: window excludes {_short(r2_star.message)}."
+                                ev = r2_star.evidence
+                                span = {"start": r2_star.item, "end": now_ref} if (r2_star.item and now_ref) else None
+                            else:
+                                msg = "Since fails: no witness in window."
+                                ev = ()
+                                span = None
+                            example = None
+                    else:
+                        sat = False
+                        msg = "Since fails: no witness in window."
+                        ev = ()
+                        span = None
+                        example = None
+
+                    out_reason = Reason(
+                        kind="since",
+                        value=sat,
+                        message=msg,
+                        time=current_time,
+                        children=tuple(x for x in (r1, r2) if x is not None),
+                        item=now_ref,
+                        evidence=ev,
+                        span=span,
+                        example_reason=example,
+                    )
+                    out = {"Time": current_time, "Sat": sat, "reason": out_reason}
                     self.output(ls.DataItem(out))
 
         parallel = term1 | term2
@@ -560,7 +871,8 @@ class Earlier(PMTL):
         self.interval = interval
 
     def __str__(self):
-        return f"Earlier({self.formula})"
+        return f"Earlier({self.formula}, {self.interval})" if self.interval else f"Earlier({self.formula})"
+
 
     def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         formula = Since(TrueFormula(), self.formula, self.interval)
@@ -579,7 +891,7 @@ class Hist(PMTL):
         self.interval = interval
 
     def __str__(self):
-        return f"Hist({self.formula})"
+        return f"Hist({self.formula}, {self.interval})" if self.interval else f"Hist({self.formula})"
 
     def to_term(self, name: str | None = None) -> ls.SequentialTerm:
         formula = ~Earlier(~self.formula, self.interval)
