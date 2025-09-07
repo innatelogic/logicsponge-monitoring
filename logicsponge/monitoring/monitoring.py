@@ -13,7 +13,7 @@ Time = datetime
 TimeDelta = timedelta
 
 
-def _get_id_from(item: ls.DataItem, id_key: str = "ID") -> Any | None:
+def _get_id_from(item: ls.DataItem, id_key: str = "ITEM_ID") -> Any | None:
     return item.get(id_key) if isinstance(item, dict) and id_key in item else None
 
 
@@ -28,12 +28,12 @@ def _safe_get(obj, key, default=None):
 
 
 def _item_ref(item: ls.DataItem) -> dict[str, Any] | None:
-    # Returns {"id": ..., "time": ...} or None
-    _id = _safe_get(item, "ID", None)
+    # Returns {"item_id": ..., "time": ...} or None
+    _id = _safe_get(item, "ITEM_ID", None)
     _t  = _safe_get(item, "Time", None)
     if _id is None and _t is None:
         return None
-    return {"id": _id, "time": _t}
+    return {"item_id": _id, "time": _t}
 
 
 
@@ -136,7 +136,7 @@ class Condition:
         t = item.get("Time") if (self.include_time and isinstance(item, dict)) else None
 
         # identity + evidence for timeline
-        ir = {"id": item.get("ID"), "time": t} if isinstance(item, dict) else None
+        ir = {"item_id": item.get("ITEM_ID"), "time": t} if isinstance(item, dict) else None
         evidence = (ir,) if ir else ()
 
         return Reason(
@@ -378,7 +378,7 @@ class Proposition(PMTL):
 
                 # Ensure label, item, evidence (robust to non-dict items)
                 lbl = base.label or prop._label or ""
-                ir  = base.item or _item_ref(item)            # {"id":..., "time":...} or None
+                ir  = base.item or _item_ref(item)            # {"item_id":..., "time":...} or None
                 ev  = base.evidence or ((ir,) if ir else ())
 
                 # Only rebuild Reason if we need to inject/fix fields
