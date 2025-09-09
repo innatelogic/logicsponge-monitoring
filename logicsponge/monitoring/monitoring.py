@@ -98,7 +98,6 @@ class Reason:
         return f"{head}{self.message} (value={self.value}){ex}"
 
 
-
 # ---- Condition: minimal API per your spec, now returning Reason ----
 class Condition:
     """
